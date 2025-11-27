@@ -30,11 +30,14 @@ pub const HeaderParseResult = struct {
     leftover: ?[]const u8,
 
     pub fn deinit(self: *HeaderParseResult, allocator: Allocator) void {
-        self.headers.deinit();
+        for (self.headers) |*header| {
+            header.deinit(allocator);
+        }
+
         self.requestline.deinit(allocator);
         if (self.leftover) |value| {
-            self.allocator.free(value);
-        }
+            allocator.free(value);
+        } 
     }
 };
 

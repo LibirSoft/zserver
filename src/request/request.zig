@@ -2,6 +2,7 @@ const std = @import("std");
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const Stream = std.net.Stream;
+
 const types = @import("types.zig");
 const Request = types.Request;
 const RequestLine = types.RequestLine;
