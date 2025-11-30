@@ -1,9 +1,10 @@
 const std = @import("std");
 const net = std.net;
 const posix = std.posix;
+const Allocator = std.mem.Allocator;
+
 const reqParser = @import("./request/request.zig");
 const request = @import("./request/types.zig");
-const Allocator = std.mem.Allocator;
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -25,7 +26,7 @@ pub fn main() !void {
     // bind our socket to address we created.
     try posix.bind(listener, &address.any, address.getOsSockLen());
     // finally ve can listen (if we want to be client, We can use `.connect` for connecting), with 128 backlog
-    try posix.listen(listener, 128);
+    try posix.listen(listener, 4096);
 
     // here we go boys we start rolling
 
