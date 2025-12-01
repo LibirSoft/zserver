@@ -31,6 +31,7 @@ pub fn parseRequest(allocator: Allocator, stream: anytype) !Request {
     // add leftover
     if (requestHeader.leftover) |leftover| {
         try bodyBuffer.appendSlice(allocator, leftover);
+        allocator.free(leftover);
     }
 
     // read all data left
@@ -64,6 +65,7 @@ fn getContentLength(headers: []const Header) ?usize {
 fn parseRequestHeader(allocator: Allocator, stream: anytype, maxheadersize: u32) !HeaderParseResult {
     var buffer: ArrayList(u8) = .empty;
     errdefer buffer.deinit(allocator);
+    defer buffer.deinit(allocator);
 
     const headerEndPos = try readUntilDoubleNewline(allocator, stream, &buffer, maxheadersize);
 
@@ -87,6 +89,7 @@ fn parseRequestHeader(allocator: Allocator, stream: anytype, maxheadersize: u32)
 
     var headers: ArrayList(Header) = .empty;
     errdefer headers.deinit(allocator);
+    defer headers.deinit(allocator);
 
     while (lines.next()) |line| {
         if (line.len == 0) continue;
@@ -167,11 +170,36 @@ test "parse simple GET request" {
     const reader = fbs.reader();
 
     var lines = try parseRequest(allocator, reader);
-    defer lines.deinit();
+    defer lines.deinit(allocator);
 
-    // 4. Assertions
-    try std.testing.expectEqual(@as(usize, 3), lines.len()); // GET, Host, boş satır
-    try std.testing.expectEqualStrings("GET /hello HTTP/1.1", lines.items()[0]);
-    try std.testing.expectEqualStrings("Host: localhost", lines.items()[1]);
-    try std.testing.expectEqualStrings("", lines.items()[2]);
+    try std.testing.expectEqualStrings("HTTP/1.1", lines.requestLine.httpVersion);
+    try std.testing.expectEqualStrings("GET", lines.requestLine.method);
+    try std.testing.expectEqualStrings("/hello", lines.requestLine.requestTarget);
+    try std.testing.expectEqualStrings("Host", lines.headers[0].key);
+    try std.testing.expectEqualStrings("localhost", lines.headers[0].value);
+    try std.testing.expect(lines.body == null);
+}
+
+test "parse simple POST request" {
+    const allocator = std.testing.allocator;
+
+    const body = "{\"username\":\"test\"}";
+    const requestData = "POST /api/login HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Content-Type: application/json\r\n" ++
+        "Content-Length: 19\r\n" ++
+        "\r\n" ++
+        body;
+
+    var fbs = std.io.fixedBufferStream(requestData);
+    const reader = fbs.reader();
+
+    var request = try parseRequest(allocator, reader);
+    defer request.deinit(allocator);
+
+    try std.testing.expectEqualStrings("POST", request.requestLine.method);
+    try std.testing.expectEqualStrings("/api/login", request.requestLine.requestTarget);
+    try std.testing.expectEqualStrings("HTTP/1.1", request.requestLine.httpVersion);
+    try std.testing.expect(request.body != null);
+    try std.testing.expectEqualStrings(body, request.body.?);
 }
