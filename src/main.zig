@@ -2,9 +2,10 @@ const std = @import("std");
 const net = std.net;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
-
 const reqParser = @import("./request/request.zig");
 const request = @import("./request/types.zig");
+const res = @import("response/types.zig");
+const comm = @import("common/types.zig");
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -55,37 +56,37 @@ pub fn main() !void {
 
         const stream = std.net.Stream{ .handle = socket };
 
-        var req: request.Request = reqParser.parseRequest(allocator, stream) catch |err| {
+        var stdout_buffer: [4096]u8 = undefined;
+        var stdout_writer = stream.writer(&stdout_buffer);
+        const stdout = &stdout_writer.interface;
+
+        var response: ?res.Response = null;
+        defer if (response) |*r| r.deinit(allocator);
+
+        var req: ?request.Request = reqParser.parseRequest(allocator, stream) catch |err| blk: {
             std.debug.print("request parse error: {any}\n", .{err});
-            write(socket, "HTTP/1.1 400 Bad Request\r\n\r\n") catch {};
-            continue;
+
+            break :blk null;
         };
-        defer req.deinit(allocator);
-
-        std.debug.print("Request: method={s}, target={s}, version={s}\n", .{ req.requestLine.method, req.requestLine.requestTarget, req.requestLine.httpVersion });
-        for (req.headers) |header| {
-            std.debug.print("  Header: {s}: {s}\n", .{ header.key, header.value });
-        }
-        if (req.body) |body| {
-            std.debug.print("  Body: {s}\n", .{body});
-        }
-
-        write(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nHello World!\n") catch |err| {
-            std.debug.print("error writing: {any}\n", .{err});
+        defer if (req) |*valreq| {
+            valreq.deinit(allocator);
         };
-    }
-}
 
-fn write(socket: posix.socket_t, msg: []const u8) !void {
-    var pos: usize = 0;
-    while (pos < msg.len) {
-        // this return how much byte it written
-        const written = try posix.write(socket, msg[pos..]);
-        if (written == 0) {
-            return error.Closed;
+        if (req) |valreq| {
+            std.debug.print("value: {any}\n", .{valreq});
+            var builder = res.ResponseBuilder.init(allocator, 200, "OK");
+            _ = try builder.addHeader(comm.Header{ .key = "x-test-header", .value = "test" });
+            _ = try builder.addBody("Hey this is my first response!");
+
+            response = try builder.build();
+        } else {
+            var builder = res.ResponseBuilder.init(allocator, 400, "Bad Request");
+            response = try builder.build();
         }
-        // so we will update our position due to return. this way we can send all the data
-        pos += written;
+
+        if (response) |*r| {
+            try r.serialize(stdout);
+        }
     }
 }
 

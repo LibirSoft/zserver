@@ -2,11 +2,11 @@ const std = @import("std");
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const Stream = std.net.Stream;
+const head = @import("../common/types.zig");
 
 const types = @import("types.zig");
 const Request = types.Request;
 const RequestLine = types.RequestLine;
-const Header = types.Header;
 const HeaderParseResult = types.HeaderParseResult;
 
 const SEPERATOR = "\r\n";
@@ -53,7 +53,7 @@ pub fn parseRequest(allocator: Allocator, stream: anytype) !Request {
     return Request{ .headers = requestHeader.headers, .requestLine = requestHeader.requestline, .body = body };
 }
 
-fn getContentLength(headers: []const Header) ?usize {
+fn getContentLength(headers: []const head.Header) ?usize {
     for (headers) |header| {
         if (std.ascii.eqlIgnoreCase(header.key, "content-length")) {
             return std.fmt.parseInt(usize, header.value, 10) catch null;
@@ -64,7 +64,6 @@ fn getContentLength(headers: []const Header) ?usize {
 
 fn parseRequestHeader(allocator: Allocator, stream: anytype, maxheadersize: u32) !HeaderParseResult {
     var buffer: ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
     defer buffer.deinit(allocator);
 
     const headerEndPos = try readUntilDoubleNewline(allocator, stream, &buffer, maxheadersize);
@@ -87,8 +86,7 @@ fn parseRequestHeader(allocator: Allocator, stream: anytype, maxheadersize: u32)
 
     const requestLine = try parseRequestLine(allocator, requestLineStr);
 
-    var headers: ArrayList(Header) = .empty;
-    errdefer headers.deinit(allocator);
+    var headers: ArrayList(head.Header) = .empty;
     defer headers.deinit(allocator);
 
     while (lines.next()) |line| {
@@ -100,18 +98,18 @@ fn parseRequestHeader(allocator: Allocator, stream: anytype, maxheadersize: u32)
 
     return HeaderParseResult{
         .requestline = requestLine,
-        .headers = try allocator.dupe(Header, headers.items),
+        .headers = try allocator.dupe(head.Header, headers.items),
         .leftover = if (leftover) |value| try allocator.dupe(u8, value) else null,
     };
 }
 
-fn parseHeaderLine(allocator: Allocator, headerLine: []const u8) !Header {
+fn parseHeaderLine(allocator: Allocator, headerLine: []const u8) !head.Header {
     var splited = std.mem.splitSequence(u8, headerLine, ": ");
 
     const key = splited.next() orelse return error.MalformedRequestLine;
     const value = splited.next() orelse return error.MalformedRequestLine;
 
-    return Header{ .key = try allocator.dupe(u8, key), .value = try allocator.dupe(u8, value) };
+    return head.Header{ .key = try allocator.dupe(u8, key), .value = try allocator.dupe(u8, value) };
 }
 
 fn parseRequestLine(allocator: Allocator, line: []const u8) !RequestLine {

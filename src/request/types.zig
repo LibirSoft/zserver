@@ -1,4 +1,5 @@
 const std = @import("std");
+const head = @import("../common/types.zig");
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 
@@ -13,19 +14,10 @@ pub const RequestLine = struct {
         allocator.free(self.method);
     }
 };
-pub const Header = struct {
-    key: []const u8,
-    value: []const u8,
-
-    pub fn deinit(self: *Header, allocator: Allocator) void {
-        allocator.free(self.key);
-        allocator.free(self.value);
-    }
-};
 
 pub const HeaderParseResult = struct {
     requestline: RequestLine,
-    headers: []Header,
+    headers: []head.Header,
     // leftover data from reading header
     leftover: ?[]const u8,
 
@@ -37,13 +29,13 @@ pub const HeaderParseResult = struct {
         self.requestline.deinit(allocator);
         if (self.leftover) |value| {
             allocator.free(value);
-        } 
+        }
     }
 };
 
 pub const Request = struct {
     requestLine: RequestLine,
-    headers: []Header,
+    headers: []head.Header,
     body: ?[]const u8,
 
     pub fn deinit(self: *Request, allocator: Allocator) void {
