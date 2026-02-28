@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
 
-    // ZLS için check step - sadece compile hatalarını kontrol eder
+    // ZLS için check step
     const check = b.step("check", "Check if the code compiles");
     check.dependOn(&exe.step);
 }
