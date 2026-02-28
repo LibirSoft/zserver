@@ -74,7 +74,7 @@ pub const ResponseBuilder = struct {
         return self;
     }
 
-    pub fn addBody(self: *ResponseBuilder, body: []const u8) !*ResponseBuilder {
+    pub fn addBody(self: *ResponseBuilder, body: []const u8) *ResponseBuilder {
         self.body = body;
         return self;
     }
