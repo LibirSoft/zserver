@@ -23,6 +23,7 @@ A simple HTTP/1.1 server written from scratch in Zig. Zero external dependencies
 - [ ] Zero-copy parsing
 - [ ] Memory pooling (Arena Allocator)
 - [ ] Write batching (corking)
+- [ ] WebSocket support
 
 ## Usage
 
