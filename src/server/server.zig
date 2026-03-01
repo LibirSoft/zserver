@@ -34,7 +34,7 @@ pub const Server = struct {
     pub fn listen(self: *Server) !void {
         const address = try std.net.Address.parseIp(self.address, self.port);
 
-        const tpe: u32 = posix.SOCK.STREAM;
+        const tpe: u32 = posix.SOCK.STREAM | posix.SOCK.NONBLOCK;
         const protocol: comptime_int = posix.IPPROTO.TCP;
         const listener: posix.socket_t = try posix.socket(address.any.family, tpe, protocol);
         defer posix.close(listener);
@@ -50,53 +50,74 @@ pub const Server = struct {
 
         std.debug.print("Server running at http://{s}:{} \n", .{ self.address, self.port });
 
+        const epfd = try posix.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
+
+        // add listener to epoll
+        //
+        var listenerEvent = std.os.linux.epoll_event{
+            .events = std.os.linux.EPOLL.IN,
+            .data = .{ .fd = listener },
+        };
+
+        try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_ADD, listener, &listenerEvent);
+
+        // epoll events
+        var events: [1024]std.os.linux.epoll_event = undefined;
+
         while (true) {
-            var client_address: net.Address = undefined;
-            var client_address_len: posix.socklen_t = @sizeOf(net.Address);
+            // now we got sockets
+            const n = posix.epoll_wait(epfd, &events, -1);
 
-            const socket = posix.accept(listener, &client_address.any, &client_address_len, 0) catch |err| {
-                std.debug.print("error accept: {any}\n", .{err});
-                continue;
-            };
-            defer posix.close(socket);
+            for (events[0..n]) |event| {
+                var client_address: net.Address = undefined;
+                var client_address_len: posix.socklen_t = @sizeOf(net.Address);
 
-            // std.debug.print("socket connected on port: {any} \n", .{client_address.getPort()});
+                // if new connection
+                if (event.events == std.os.linux.EPOLL.IN and event.data.fd == listener) {
+                    const socket = posix.accept(listener, &client_address.any, &client_address_len, posix.SOCK.NONBLOCK) catch |err| {
+                        std.debug.print("error accept: {any}\n", .{err});
+                        continue;
+                    };
 
-            const timeout = posix.timeval{ .sec = 2, .usec = 500_000 };
-            // read timeout 2.5 sec
-            try posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &std.mem.toBytes(timeout));
+                    var client_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = socket } };
 
-            // write timeout
-            try posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &std.mem.toBytes(timeout));
+                    try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_ADD, socket, &client_event);
+                } else if (event.events == std.os.linux.EPOLL.IN) {
+                    const socket = event.data.fd;
 
-            const stream = std.net.Stream{ .handle = socket };
+                    const stream = std.net.Stream{ .handle = socket };
 
-            var stdout_buffer: [4096]u8 = undefined;
-            var stdout_writer = stream.writer(&stdout_buffer);
-            const stdout = &stdout_writer.interface;
+                    var stdout_buffer: [4096]u8 = undefined;
+                    var stdout_writer = stream.writer(&stdout_buffer);
+                    const stdout = &stdout_writer.interface;
 
-            var response: ?Response = null;
-            defer if (response) |*r| r.deinit(self.allocator);
+                    var response: ?Response = null;
+                    defer if (response) |*r| r.deinit(self.allocator);
 
-            var req: ?Request = parseRequest(self.allocator, stream) catch |err| blk: {
-                std.debug.print("request parse error: {any}\n", .{err});
+                    var req: ?Request = parseRequest(self.allocator, stream) catch |err| blk: {
+                        std.debug.print("request parse error: {any}\n", .{err});
 
-                break :blk null;
-            };
+                        break :blk null;
+                    };
 
-            defer if (req) |*valreq| {
-                valreq.deinit(self.allocator);
-            };
+                    defer if (req) |*valreq| {
+                        valreq.deinit(self.allocator);
+                    };
 
-            if (req) |valreq| {
-                self.dispatch(valreq, &response);
-            } else {
-                var builder = ResponseBuilder.init(self.allocator, 400, "Bad Request");
-                response = try builder.build();
-            }
+                    if (req) |valreq| {
+                        self.dispatch(valreq, &response);
+                    } else {
+                        var builder = ResponseBuilder.init(self.allocator, 400, "Bad Request");
+                        response = try builder.build();
+                    }
 
-            if (response) |*r| {
-                try r.serialize(stdout);
+                    if (response) |*r| {
+                        try r.serialize(stdout);
+                    }
+
+                    try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_DEL, socket, null);
+                    posix.close(socket);
+                }
             }
         }
     }
