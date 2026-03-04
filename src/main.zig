@@ -24,6 +24,7 @@ fn handleHelloWorld(allocator: Allocator, req: Request) anyerror!Response {
     _ = req;
     var builder = ResponseBuilder.init(allocator, 200, "OK");
     _ = builder.addBody("Hello from home!\n");
+    _ = try builder.addHeader(.{ .key = "Connection", .value = "close" });
     return try builder.build();
 }
 

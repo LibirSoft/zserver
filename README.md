@@ -15,11 +15,17 @@ A simple HTTP/1.1 server written from scratch in Zig. Zero external dependencies
 - [x] 500 Internal Server Error on handler failure
 - [x] 400 Bad Request on malformed requests
 - [x] Memory management (DebugAllocator, proper deinit/free)
+- [x] epoll event loop (non-blocking I/O)
+- [x] State machine (READING → WRITING → DONE)
+- [x] Connection state tracking (HashMap per fd)
+- [x] Non-blocking read with Content-Length body support
+- [x] Response serialize to memory buffer (ArrayList writer)
+- [x] Non-blocking write with partial write handling
 
 ## TODO
 
+- [ ] HTTP/1.1 Keep-alive (connection reuse)
 - [ ] Static file serving
-- [ ] epoll (non-blocking I/O)
 - [ ] Zero-copy parsing
 - [ ] Memory pooling (Arena Allocator)
 - [ ] Write batching (corking)

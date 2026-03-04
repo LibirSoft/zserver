@@ -36,7 +36,6 @@ pub const Response = struct {
         } else {
             try writer.writeAll("\r\n");
         }
-        try writer.flush();
     }
 
     fn writeHeader(header: head.Header, writer: anytype) !void {

@@ -3,13 +3,19 @@ const net = std.net;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const Route = @import("types.zig").Route;
+const StreamState = @import("types.zig").StreamState;
 const HandlerFn = @import("types.zig").HandlerFn;
+const SocketState = @import("types.zig").SocketState;
+const ConnectionState = @import("types.zig").ConnectionState;
 const HttpMethod = @import("../common/types.zig").HttpMethod;
 const ArrayList = std.ArrayList;
 const parseRequest = @import("../request/request.zig").parseRequest;
+const readRequestStream = @import("../request/request.zig").readRequestStream;
 const Request = @import("../request/types.zig").Request;
+const streamRequestoBuffer = @import("../request/request.zig").streamRequestoBuffer;
 const Response = @import("../response/types.zig").Response;
 const ResponseBuilder = @import("../response/types.zig").ResponseBuilder;
+const streamResponseToSocket = @import("../response/response_utils.zig").streamResponseToSocket;
 
 pub const Server = struct {
     allocator: Allocator,
@@ -64,6 +70,10 @@ pub const Server = struct {
         // epoll events
         var events: [1024]std.os.linux.epoll_event = undefined;
 
+        // hasmap for socketStates
+        var connections = std.AutoHashMap(i32, ConnectionState).init(self.allocator);
+        defer connections.deinit();
+
         while (true) {
             // now we got sockets
             const n = posix.epoll_wait(epfd, &events, -1);
@@ -82,41 +92,25 @@ pub const Server = struct {
                     var client_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = socket } };
 
                     try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_ADD, socket, &client_event);
-                } else if (event.events == std.os.linux.EPOLL.IN) {
+
+                    // ad it to hasmap so we can track status
+
+                    if (connections.getPtr(socket)) |connectionState| {
+                        if (connectionState.usable == true) {
+                            connectionState.clear(self.allocator);
+                        }
+                    } else {
+                        try connections.put(socket, ConnectionState.init(socket));
+                    }
+                } else {
                     const socket = event.data.fd;
 
-                    const stream = std.net.Stream{ .handle = socket };
-
-                    var stdout_buffer: [4096]u8 = undefined;
-                    var stdout_writer = stream.writer(&stdout_buffer);
-                    const stdout = &stdout_writer.interface;
-
-                    var response: ?Response = null;
-                    defer if (response) |*r| r.deinit(self.allocator);
-
-                    var req: ?Request = parseRequest(self.allocator, stream) catch |err| blk: {
-                        std.debug.print("request parse error: {any}\n", .{err});
-
-                        break :blk null;
-                    };
-
-                    defer if (req) |*valreq| {
-                        valreq.deinit(self.allocator);
-                    };
-
-                    if (req) |valreq| {
-                        self.dispatch(valreq, &response);
-                    } else {
-                        var builder = ResponseBuilder.init(self.allocator, 400, "Bad Request");
-                        response = try builder.build();
+                    if (connections.getPtr(socket)) |connectionState| {
+                        self.stateMachine(epfd, connectionState) catch |err| {
+                            std.debug.print("state machine error: {any}\n", .{err});
+                            connectionState.state = .DONE;
+                        };
                     }
-
-                    if (response) |*r| {
-                        try r.serialize(stdout);
-                    }
-
-                    try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_DEL, socket, null);
-                    posix.close(socket);
                 }
             }
         }
@@ -237,5 +231,77 @@ pub const Server = struct {
 
         var builder = ResponseBuilder.init(self.allocator, 404, "Not Found");
         response.* = builder.build() catch return;
+    }
+
+    fn stateMachine(self: *Server, epfd: i32, connection: *ConnectionState) !void {
+        const state: SocketState = connection.state;
+
+        _ = switch (state) {
+            .READING => {
+                // read here
+                connection.usable = false;
+
+                const stream = std.net.Stream{ .handle = connection.fd };
+                const read_state: StreamState = try streamRequestoBuffer(stream, &connection.read_buffer, &connection.bytes_read, &connection.read_byte_target);
+
+                // then we can strat dispatch and create response
+                if (read_state == .READY) {
+                    var bufferStream = std.io.fixedBufferStream(connection.read_buffer[0..connection.bytes_read]);
+
+                    var response: ?Response = null;
+                    defer if (response) |*r| r.deinit(self.allocator);
+
+                    var req: ?Request = parseRequest(self.allocator, &bufferStream) catch |err| blk: {
+                        std.debug.print("request parse error: {any}\n", .{err});
+
+                        break :blk null;
+                    };
+
+                    defer if (req) |*valreq| {
+                        valreq.deinit(self.allocator);
+                    };
+
+                    if (req) |valreq| {
+                        self.dispatch(valreq, &response);
+                    } else {
+                        var builder = ResponseBuilder.init(self.allocator, 400, "Bad Request");
+                        response = try builder.build();
+                    }
+
+                    // now we got response we can safely turn writing state
+                    connection.state = .WRITING;
+                    if (response) |*val_res| {
+                        var writer_array: ArrayList(u8) = .empty;
+
+                        const writer = writer_array.writer(self.allocator);
+                        try val_res.serialize(writer);
+                        connection.response_bytes = try writer_array.toOwnedSlice(self.allocator);
+
+                        var client_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.OUT, .data = .{ .fd = connection.fd } };
+
+                        try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_MOD, connection.fd, &client_event);
+                    }
+                }
+            },
+            .WRITING => {
+                // create request object Than dispatch it and resolve response
+                if (connection.response_bytes) |response| {
+                    const write_state: StreamState = streamResponseToSocket(connection.fd, response, &connection.bytes_sent) catch |err| {
+                        if (err == std.posix.WriteError.WouldBlock) return;
+                        connection.state = .DONE;
+                        return;
+                    };
+
+                    if (write_state == StreamState.READY) {
+                        connection.state = .DONE;
+                    }
+                }
+            },
+            .DONE => {
+                try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_DEL, connection.fd, null);
+                posix.close(connection.fd);
+                connection.clear(self.allocator);
+            },
+        };
     }
 };
