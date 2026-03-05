@@ -13,7 +13,6 @@ const StreamState = @import("../server/types.zig").StreamState;
 const SEPERATOR = "\r\n";
 const ENDOFHEADER = "\r\n\r\n";
 
-// TODO: return state
 pub fn streamRequestoBuffer(stream: anytype, buffer: []u8, bytes_read: *usize, read_target: *usize) !StreamState {
     const MAX_HEADER_SIZE = 4096;
 
@@ -60,45 +59,47 @@ pub fn streamRequestoBuffer(stream: anytype, buffer: []u8, bytes_read: *usize, r
     return .NEED_MORE;
 }
 
-pub fn parseRequest(allocator: Allocator, stream: anytype) !Request {
-    // this is nginx default so it safe to use idk
-    const MAX_HEADER_SIZE = 8192;
+pub fn parseRequest(allocator: Allocator, data: []const u8) !Request {
+    // find header end
+    const header_end = std.mem.indexOf(u8, data, ENDOFHEADER) orelse return error.MalformedRequest;
 
-    const requestHeader: HeaderParseResult = try parseRequestHeader(allocator, stream, MAX_HEADER_SIZE);
 
-    const contentLength = getContentLength(requestHeader.headers) orelse 0;
+    const header_data = data[0..header_end];
 
-    // no body
-    if (contentLength == 0) {
-        return Request{ .headers = requestHeader.headers, .requestLine = requestHeader.requestline, .body = null };
+    const body_start = header_end + 4;
+    const body: ?[]const u8 = if (body_start < data.len)
+        data[body_start..] 
+    else
+        null;
+
+    var lines = std.mem.splitSequence(u8, header_data, SEPERATOR);
+
+    // first line is Request line so here we go
+    const request_line_str = lines.next() orelse return error.EmptyRequest;
+    const request_line = try parseRequestLine(request_line_str);
+
+    var header_count: usize = 0;
+    var counter = lines;
+    while (counter.next()) |line| {
+        if (line.len > 0) header_count += 1;
     }
 
-    var bodyBuffer: ArrayList(u8) = .empty;
-    defer bodyBuffer.deinit(allocator);
+    // alloc memory for headers one time
+    const headers = try allocator.alloc(head.Header, header_count);
 
-    // add leftover
-    if (requestHeader.leftover) |leftover| {
-        try bodyBuffer.appendSlice(allocator, leftover);
-        allocator.free(leftover);
+    // parse headers line by line
+    var i: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        headers[i] = try parseHeaderLine(line);
+        i += 1;
     }
 
-    // read all data left
-    var tempChunk: [512]u8 = undefined;
-    while (bodyBuffer.items.len < contentLength) {
-        const remaining = contentLength - bodyBuffer.items.len;
-        const toRead = @min(remaining, tempChunk.len);
-
-        const bytesRead = try stream.read(tempChunk[0..toRead]);
-        if (bytesRead == 0) {
-            return error.UnexpectedEndOfStream;
-        }
-
-        try bodyBuffer.appendSlice(allocator, tempChunk[0..bytesRead]);
-    }
-
-    const body = try allocator.dupe(u8, bodyBuffer.items);
-
-    return Request{ .headers = requestHeader.headers, .requestLine = requestHeader.requestline, .body = body };
+    return Request{
+        .requestLine = request_line,
+        .headers = headers,
+        .body = body,
+    };
 }
 
 fn getContentLength(headers: []const head.Header) ?usize {
@@ -151,17 +152,16 @@ fn parseRequestHeader(allocator: Allocator, stream: anytype, maxheadersize: u32)
     };
 }
 
-fn parseHeaderLine(allocator: Allocator, headerLine: []const u8) !head.Header {
+fn parseHeaderLine(headerLine: []const u8) !head.Header {
     var splited = std.mem.splitSequence(u8, headerLine, ": ");
 
     const key = splited.next() orelse return error.MalformedRequestLine;
     const value = splited.next() orelse return error.MalformedRequestLine;
 
-    return head.Header{ .key = try allocator.dupe(u8, key), .value = try allocator.dupe(u8, value) };
+    return head.Header{ .key = key, .value = value };
 }
-
-fn parseRequestLine(allocator: Allocator, line: []const u8) !RequestLine {
-    var parts = std.mem.splitAny(u8, line, " ");
+fn parseRequestLine(line: []const u8) !RequestLine {
+    var parts = std.mem.splitScalar(u8, line, ' ');
 
     const method = parts.next() orelse return error.MalformedRequestLine;
     const target = parts.next() orelse return error.MalformedRequestLine;
@@ -176,9 +176,9 @@ fn parseRequestLine(allocator: Allocator, line: []const u8) !RequestLine {
     }
 
     return RequestLine{
-        .method = try allocator.dupe(u8, method),
-        .requestTarget = try allocator.dupe(u8, target),
-        .httpVersion = try allocator.dupe(u8, version),
+        .method = method,
+        .requestTarget = target,
+        .httpVersion = version,
     };
 }
 

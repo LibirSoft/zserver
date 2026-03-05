@@ -68,7 +68,7 @@ pub const Server = struct {
         try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_ADD, listener, &listenerEvent);
 
         // epoll events
-        var events: [1024]std.os.linux.epoll_event = undefined;
+        var events: [4024]std.os.linux.epoll_event = undefined;
 
         // hasmap for socketStates
         var connections = std.AutoHashMap(i32, ConnectionState).init(self.allocator);
@@ -211,9 +211,16 @@ pub const Server = struct {
     }
 
     fn dispatch(self: *Server, request: Request, response: *?Response) void {
+        const method = HttpMethod.fromString(request.requestLine.method) orelse null;
+
+        if (method == null) {
+            var builder = ResponseBuilder.init(self.allocator, 400, "Bad Request");
+            response.* = builder.build() catch return;
+            return;
+        }
+
         for (self.routes.items) |route| {
             // if method not match continue
-            const method = HttpMethod.fromString(request.requestLine.method) orelse continue;
             if (method != route.method) continue;
 
             // if path not match continue
@@ -246,12 +253,10 @@ pub const Server = struct {
 
                 // then we can strat dispatch and create response
                 if (read_state == .READY) {
-                    var bufferStream = std.io.fixedBufferStream(connection.read_buffer[0..connection.bytes_read]);
-
                     var response: ?Response = null;
                     defer if (response) |*r| r.deinit(self.allocator);
 
-                    var req: ?Request = parseRequest(self.allocator, &bufferStream) catch |err| blk: {
+                    var req: ?Request = parseRequest(self.allocator, connection.read_buffer[0..connection.bytes_read]) catch |err| blk: {
                         std.debug.print("request parse error: {any}\n", .{err});
 
                         break :blk null;
@@ -262,6 +267,12 @@ pub const Server = struct {
                     };
 
                     if (req) |valreq| {
+                        for (valreq.headers) |valhead| {
+                            // we need to close connection
+                            if (std.mem.eql(u8, valhead.key, "Connection") and std.mem.eql(u8, valhead.value, "close")) {
+                                connection.keepConnection = false;
+                            }
+                        }
                         self.dispatch(valreq, &response);
                     } else {
                         var builder = ResponseBuilder.init(self.allocator, 400, "Bad Request");
@@ -269,30 +280,54 @@ pub const Server = struct {
                     }
 
                     // now we got response we can safely turn writing state
-                    connection.state = .WRITING;
                     if (response) |*val_res| {
-                        var writer_array: ArrayList(u8) = .empty;
+                        var fbs = std.io.fixedBufferStream(&connection.response_buffer);
 
-                        const writer = writer_array.writer(self.allocator);
-                        try val_res.serialize(writer);
-                        connection.response_bytes = try writer_array.toOwnedSlice(self.allocator);
+                        if (val_res.serialize(fbs.writer())) |_| {
+                            // success fixed buffer is enough
+                            connection.response_bytes = .{ .fixed = fbs.getWritten() };
+                        } else |err| {
+                            if (err == error.NoSpaceLeft) {
+                                // Fallback: heap allocation :(
+                                var writer_array: ArrayList(u8) = .empty;
+                                const writer = writer_array.writer(self.allocator);
+                                try val_res.serialize(writer);
+                                connection.response_bytes = .{ .allocated = try writer_array.toOwnedSlice(self.allocator) };
+                            } else return err;
+                        }
 
                         var client_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.OUT, .data = .{ .fd = connection.fd } };
 
                         try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_MOD, connection.fd, &client_event);
                     }
+                    connection.state = .WRITING;
                 }
             },
             .WRITING => {
                 // create request object Than dispatch it and resolve response
                 if (connection.response_bytes) |response| {
-                    const write_state: StreamState = streamResponseToSocket(connection.fd, response, &connection.bytes_sent) catch |err| {
+                    const writeResponse = switch (response) {
+                        .allocated => response.allocated,
+                        .fixed => response.fixed,
+                    };
+
+                    const write_state: StreamState = streamResponseToSocket(connection.fd, writeResponse, &connection.bytes_sent) catch |err| {
                         if (err == std.posix.WriteError.WouldBlock) return;
                         connection.state = .DONE;
                         return;
                     };
 
                     if (write_state == StreamState.READY) {
+                        if (connection.keepConnection) {
+                            connection.clear(self.allocator);
+
+                            var client_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = connection.fd } };
+
+                            try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_MOD, connection.fd, &client_event);
+
+                            return;
+                        }
+
                         connection.state = .DONE;
                     }
                 }

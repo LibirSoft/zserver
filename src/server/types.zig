@@ -34,14 +34,22 @@ pub const StreamState = enum {
     READY,
 };
 
+// for better speed
+const ResponseSource = union(enum) {
+    fixed: []const u8,
+    allocated: []const u8,
+};
+
 pub const ConnectionState = struct {
     state: SocketState = SocketState.READING,
     read_buffer: [4096]u8 = undefined,
     bytes_read: usize = 0,
     read_byte_target: usize = 0,
-    response_bytes: ?[]const u8 = null,
+    response_bytes: ?ResponseSource = null,
+    response_buffer: [4096]u8 = undefined,
     bytes_sent: usize = 0,
     usable: bool = true,
+    keepConnection: bool = true,
     fd: posix.socket_t,
 
     pub fn init(fd: posix.socket_t) ConnectionState {
@@ -56,9 +64,14 @@ pub const ConnectionState = struct {
         self.bytes_read = 0;
         self.bytes_sent = 0;
         self.read_byte_target = 0;
+        self.keepConnection = true;
 
         if (self.response_bytes) |responseBytes| {
-            allocator.free(responseBytes);
+            switch (responseBytes) {
+                .allocated => |bytes| allocator.free(bytes),
+                .fixed => {},
+            }
+
             self.response_bytes = null;
         }
     }

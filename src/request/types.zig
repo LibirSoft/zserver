@@ -39,16 +39,6 @@ pub const Request = struct {
     body: ?[]const u8,
 
     pub fn deinit(self: *Request, allocator: Allocator) void {
-        self.requestLine.deinit(allocator);
-
-        for (self.headers) |*header| {
-            header.deinit(allocator);
-        }
-
         allocator.free(self.headers);
-
-        if (self.body) |body| {
-            allocator.free(body);
-        }
     }
 };

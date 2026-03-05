@@ -21,12 +21,25 @@ A simple HTTP/1.1 server written from scratch in Zig. Zero external dependencies
 - [x] Non-blocking read with Content-Length body support
 - [x] Response serialize to memory buffer (ArrayList writer)
 - [x] Non-blocking write with partial write handling
+- [x] HTTP/1.1 Keep-alive (connection reuse)
+- [x] Zero-copy request parsing (slice-based, no string allocations)
+- [x] Fixed buffer response serialization (with heap fallback)
+- [x] Tagged union for response memory ownership (ResponseSource)
+- [x] Benchmarked: ~151K req/sec (12 threads, 400 connections, 30s)
+
+## Performance Journey
+
+| Milestone | req/sec |
+|-----------|---------|
+| Blocking I/O | ~6,600 |
+| + epoll (non-blocking) | ~20,000 |
+| + keep-alive | ~40,000 |
+| + dispatch fix + fixed buffer | ~46,000 |
+| + zero-copy parsing | ~151,000 |
 
 ## TODO
 
-- [ ] HTTP/1.1 Keep-alive (connection reuse)
-- [ ] Static file serving
-- [ ] Zero-copy parsing
+- [ ] Robust error handling (ConnectionReset, UnexpectedEndOfStream graceful handling)
 - [ ] Memory pooling (Arena Allocator)
 - [ ] Write batching (corking)
 - [ ] WebSocket support
