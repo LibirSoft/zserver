@@ -94,7 +94,6 @@ pub const Server = struct {
                     try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_ADD, socket, &client_event);
 
                     // ad it to hasmap so we can track status
-
                     if (connections.getPtr(socket)) |connectionState| {
                         if (connectionState.usable == true) {
                             connectionState.clear(self.allocator);
@@ -241,35 +240,33 @@ pub const Server = struct {
     }
 
     fn stateMachine(self: *Server, epfd: i32, connection: *ConnectionState) !void {
-        const state: SocketState = connection.state;
-
-        _ = switch (state) {
+        _ = switch (connection.state) {
             .READING => {
-                // read here
                 connection.usable = false;
+                const rd = &connection.read_data;
 
                 const stream = std.net.Stream{ .handle = connection.fd };
-                const read_state: StreamState = try streamRequestoBuffer(stream, &connection.read_buffer, &connection.bytes_read, &connection.read_byte_target);
+                const read_state = try streamRequestoBuffer(stream, connection);
 
-                // then we can strat dispatch and create response
                 if (read_state == .READY) {
                     var response: ?Response = null;
                     defer if (response) |*r| r.deinit(self.allocator);
 
-                    var req: ?Request = parseRequest(self.allocator, connection.read_buffer[0..connection.bytes_read]) catch |err| blk: {
+                    var req: ?Request = parseRequest(
+                        self.allocator,
+                        rd.read_buffer[0..rd.bytes_read],
+                        rd.header_pos,
+                        rd.have_body,
+                    ) catch |err| blk: {
                         std.debug.print("request parse error: {any}\n", .{err});
-
                         break :blk null;
                     };
 
-                    defer if (req) |*valreq| {
-                        valreq.deinit(self.allocator);
-                    };
+                    defer if (req) |*valreq| valreq.deinit(self.allocator);
 
                     if (req) |valreq| {
-                        for (valreq.headers) |valhead| {
-                            // we need to close connection
-                            if (std.mem.eql(u8, valhead.key, "Connection") and std.mem.eql(u8, valhead.value, "close")) {
+                        for (valreq.headers) |h| {
+                            if (std.mem.eql(u8, h.key, "Connection") and std.mem.eql(u8, h.value, "close")) {
                                 connection.keepConnection = false;
                             }
                         }
@@ -279,16 +276,13 @@ pub const Server = struct {
                         response = try builder.build();
                     }
 
-                    // now we got response we can safely turn writing state
                     if (response) |*val_res| {
                         var fbs = std.io.fixedBufferStream(&connection.response_buffer);
 
                         if (val_res.serialize(fbs.writer())) |_| {
-                            // success fixed buffer is enough
                             connection.response_bytes = .{ .fixed = fbs.getWritten() };
                         } else |err| {
                             if (err == error.NoSpaceLeft) {
-                                // Fallback: heap allocation :(
                                 var writer_array: ArrayList(u8) = .empty;
                                 const writer = writer_array.writer(self.allocator);
                                 try val_res.serialize(writer);
@@ -296,9 +290,8 @@ pub const Server = struct {
                             } else return err;
                         }
 
-                        var client_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.OUT, .data = .{ .fd = connection.fd } };
-
-                        try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_MOD, connection.fd, &client_event);
+                        var ev = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.OUT, .data = .{ .fd = connection.fd } };
+                        try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_MOD, connection.fd, &ev);
                     }
                     connection.state = .WRITING;
                 }
@@ -311,23 +304,19 @@ pub const Server = struct {
                         .fixed => response.fixed,
                     };
 
-                    const write_state: StreamState = streamResponseToSocket(connection.fd, writeResponse, &connection.bytes_sent) catch |err| {
+                    const write_state = streamResponseToSocket(connection.fd, writeResponse, &connection.bytes_sent) catch |err| {
                         if (err == std.posix.WriteError.WouldBlock) return;
                         connection.state = .DONE;
                         return;
                     };
 
-                    if (write_state == StreamState.READY) {
+                    if (write_state == .READY) {
                         if (connection.keepConnection) {
                             connection.clear(self.allocator);
-
-                            var client_event = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = connection.fd } };
-
-                            try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_MOD, connection.fd, &client_event);
-
+                            var ev = std.os.linux.epoll_event{ .events = std.os.linux.EPOLL.IN, .data = .{ .fd = connection.fd } };
+                            try posix.epoll_ctl(epfd, std.os.linux.EPOLL.CTL_MOD, connection.fd, &ev);
                             return;
                         }
-
                         connection.state = .DONE;
                     }
                 }

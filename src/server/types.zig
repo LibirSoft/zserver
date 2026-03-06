@@ -40,11 +40,17 @@ const ResponseSource = union(enum) {
     allocated: []const u8,
 };
 
-pub const ConnectionState = struct {
-    state: SocketState = SocketState.READING,
+const ReadData = struct {
     read_buffer: [4096]u8 = undefined,
     bytes_read: usize = 0,
     read_byte_target: usize = 0,
+    header_pos: usize = undefined,
+    have_body: bool = false,
+};
+
+pub const ConnectionState = struct {
+    state: SocketState = SocketState.READING,
+    read_data: ReadData,
     response_bytes: ?ResponseSource = null,
     response_buffer: [4096]u8 = undefined,
     bytes_sent: usize = 0,
@@ -55,15 +61,22 @@ pub const ConnectionState = struct {
     pub fn init(fd: posix.socket_t) ConnectionState {
         return ConnectionState{
             .fd = fd,
+            .read_data = .{},
         };
     }
 
     pub fn clear(self: *ConnectionState, allocator: Allocator) void {
         self.usable = true;
         self.state = SocketState.READING;
-        self.bytes_read = 0;
+
+        // read_data
+        self.read_data.bytes_read = 0;
+        self.read_data.read_byte_target = 0;
+        self.read_data.header_pos = undefined;
+        self.read_data.have_body = false;
+        //
+
         self.bytes_sent = 0;
-        self.read_byte_target = 0;
         self.keepConnection = true;
 
         if (self.response_bytes) |responseBytes| {

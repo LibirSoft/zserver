@@ -7,68 +7,62 @@ const head = @import("../common/types.zig");
 const types = @import("types.zig");
 const Request = types.Request;
 const RequestLine = types.RequestLine;
+const ConnectionState = @import("../server/types.zig").ConnectionState;
 const HeaderParseResult = types.HeaderParseResult;
 const StreamState = @import("../server/types.zig").StreamState;
 
 const SEPERATOR = "\r\n";
 const ENDOFHEADER = "\r\n\r\n";
 
-pub fn streamRequestoBuffer(stream: anytype, buffer: []u8, bytes_read: *usize, read_target: *usize) !StreamState {
+pub fn streamRequestoBuffer(stream: anytype, connectionState: *ConnectionState) !StreamState {
     const MAX_HEADER_SIZE = 4096;
+    const rd = &connectionState.read_data;
 
-    const bytesRead = try stream.read(if (read_target.* == 0) buffer[bytes_read.*..] else buffer[bytes_read.*..read_target.*]);
+    const read_slice = if (rd.read_byte_target == 0)
+        rd.read_buffer[rd.bytes_read..]
+    else
+        rd.read_buffer[rd.bytes_read..rd.read_byte_target];
 
-    if (bytesRead == 0) {
-        return error.UnexpectedEndOfStream;
-    }
+    const bytesRead = try stream.read(read_slice);
 
-    if (buffer.len > MAX_HEADER_SIZE) {
-        return error.HeaderTooLarge;
-    }
+    if (bytesRead == 0) return error.UnexpectedEndOfStream;
+    if (rd.read_buffer.len > MAX_HEADER_SIZE) return error.HeaderTooLarge;
 
-    bytes_read.* += bytesRead;
+    rd.bytes_read += bytesRead;
 
-    // if we found header
-
-    // we read all of it
-    if (read_target.* > 0 and bytes_read.* >= read_target.*) {
+    // already reading body, check if we got all of it
+    if (rd.read_byte_target > 0 and rd.bytes_read >= rd.read_byte_target) {
         return .READY;
     }
 
-    if (std.mem.indexOf(u8, buffer, ENDOFHEADER)) |header_end_pos| {
-        // then search for content length
-        if (std.mem.indexOf(u8, buffer, "Content-Length: ")) |content_length_pos| {
-            // look for length
+    const data = rd.read_buffer[0..rd.bytes_read];
 
-            const value_slice = buffer[content_length_pos + 16 .. header_end_pos];
+    if (std.mem.indexOf(u8, data, ENDOFHEADER)) |header_end_pos| {
+        rd.header_pos = header_end_pos;
+
+        if (std.mem.indexOf(u8, data, "Content-Length: ")) |cl_pos| {
+            const value_slice = rd.read_buffer[cl_pos + 16 .. header_end_pos];
             const cr_pos = std.mem.indexOf(u8, value_slice, "\r") orelse return error.MalformedHeader;
-
-            // we will read headerpos + 4 + length
             const length = try std.fmt.parseInt(usize, value_slice[0..cr_pos], 10);
-            // set it to read_target
-            read_target.* = header_end_pos + 4 + length;
 
-            // some requests have small bodies so we need to check this to ensure we do not miss a state
-            if (read_target.* > 0 and bytes_read.* >= read_target.*) {
-                return .READY;
-            }
+            rd.read_byte_target = header_end_pos + 4 + length;
+            rd.have_body = true;
+
+            if (rd.bytes_read >= rd.read_byte_target) return .READY;
         } else {
             return .READY;
         }
     }
+
     return .NEED_MORE;
 }
 
-pub fn parseRequest(allocator: Allocator, data: []const u8) !Request {
-    // find header end
-    const header_end = std.mem.indexOf(u8, data, ENDOFHEADER) orelse return error.MalformedRequest;
+pub fn parseRequest(allocator: Allocator, buffer: []const u8, header_pos: usize, have_body: bool) !Request {
+    const header_data = buffer[0..header_pos];
 
-
-    const header_data = data[0..header_end];
-
-    const body_start = header_end + 4;
-    const body: ?[]const u8 = if (body_start < data.len)
-        data[body_start..] 
+    const body_start = header_pos + 4;
+    const body: ?[]const u8 = if (have_body)
+        buffer[body_start..]
     else
         null;
 
